@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""TikTok Live -> YouTube Restreamer (Stable / Light / High Quality).
+"""TikTok Live -> Instagram Restreamer (Stable / Light / High Quality).
 
-Re-encodes video to true CBR 5000k (source resolution untouched),
-keyframe every 2 seconds, AAC 128k audio.
+Re-encodes video to true CBR 5000k, keyframe every 2 seconds, 
+AAC 128k audio, and formatted for Instagram RTMP ingest.
 """
 import asyncio
 import os
@@ -36,21 +36,25 @@ def _env(name, default, cast=str):
         return default
 
 
-TIKTOK_URL = _env("TIKTOK_URL", "https://www.tiktok.com/@d.shakertawfiqalaroury/live")
-YOUTUBE_RTMP = _env("YOUTUBE_RTMP", "rtmp://a.rtmp.youtube.com/live2/vksy-du6k-8cxj-u7kh-7mfm")
+TIKTOK_URL = _env("TIKTOK_URL", "https://www.tiktok.com/@m.dawoud2/live")
+
+# رابط Instagram RTMP الخاص بك
+DEFAULT_IG_RTMP = "rtmps://edgetee-upload-hbe1-1.xx.fbcdn.net:443/rtmp/1771136117370887?s_bl=1&s_fbp=mrs2-1&s_igps=1&s_ow=10&s_prp=hbe1-1&s_ps=1&s_sw=0&s_tids=1&s_vt=ig&a=Ab4x6y9WOC56wMmLbjAux3NN"
+INSTAGRAM_RTMP = _env("INSTAGRAM_RTMP", DEFAULT_IG_RTMP)
+
 _m = re.search(r"tiktok\.com/@([^/?#]+)", TIKTOK_URL)
 TIKTOK_USERNAME = _env("TIKTOK_USERNAME", _m.group(1) if _m else "")
 
-VIDEO_BITRATE = _env("VIDEO_BITRATE", "5000k")
+VIDEO_BITRATE = _env("VIDEO_BITRATE", "4000k")  # 4000k ممتازة ومستقرة مع سيرفرات انستجرام
 AUDIO_BITRATE = _env("AUDIO_BITRATE", "128k")
-FPS = _env("FPS", 30, int)                      # المصدر تقريباً 15 فريم، 30 كفاية وأخف من 60
-X264_PRESET = _env("X264_PRESET", "veryfast")   # لو speed نزلت عن 1x رجّعها ultrafast
-GOP = FPS * 2                                   # keyframe كل ثانيتين
+FPS = _env("FPS", 30, int)
+X264_PRESET = _env("X264_PRESET", "veryfast")
+GOP = FPS * 2                                   # Keyframe كل ثانيتين (مطلوبة من انستجرام)
 
-CHECK_INTERVAL = _env("CHECK_INTERVAL", 1, float)  # فحص رابط البث كل ثانية (ارفعها لو تيك توك بدأ يبطّأ)
-LIVE_END_COOLDOWN = 15   # ثواني انتظار بعد إعلان تيك توك نهاية البث
-RESTART_DELAY = 1        # ثواني بين نهاية ffmpeg وإعادة المحاولة
-CRASH_DELAY = 10         # لو ffmpeg وقع بسرعة (أقل من 10 ثواني) استنى أكتر
+CHECK_INTERVAL = _env("CHECK_INTERVAL", 1, float)
+LIVE_END_COOLDOWN = 15
+RESTART_DELAY = 1
+CRASH_DELAY = 10
 
 
 def log(msg):
@@ -79,10 +83,10 @@ def build_ffmpeg_cmd(stream_url):
         "-map", "0:v:0",
         "-map", "0:a:0?",
 
-        # Video: true CBR (no scale = same resolution as source)
+        # Video: Encoding suitable for Instagram Live
         "-c:v", "libx264",
         "-preset", X264_PRESET,
-        "-profile:v", "high",
+        "-profile:v", "baseline",                # Baseline/Main متوافق جداً مع RTMPS لانستجرام
         "-pix_fmt", "yuv420p",
         "-b:v", VIDEO_BITRATE,
         "-minrate", VIDEO_BITRATE,
@@ -90,14 +94,14 @@ def build_ffmpeg_cmd(stream_url):
         "-bufsize", VIDEO_BITRATE,
         "-x264-params", "nal-hrd=cbr:force-cfr=1",
 
-        # Constant frame rate + fixed keyframes
+        # Frame rate & Keyframes
         "-r", str(FPS),
         "-fps_mode", "cfr",
         "-g", str(GOP),
         "-keyint_min", str(GOP),
         "-sc_threshold", "0",
 
-        # Audio
+        # Audio Format (Instagram requires AAC 44.1kHz)
         "-c:a", "aac",
         "-b:a", AUDIO_BITRATE,
         "-ar", "44100",
@@ -107,7 +111,7 @@ def build_ffmpeg_cmd(stream_url):
         "-max_muxing_queue_size", "1024",
         "-flvflags", "no_duration_filesize",
         "-f", "flv",
-        YOUTUBE_RTMP,
+        INSTAGRAM_RTMP,
     ]
 
 
@@ -143,7 +147,7 @@ class LiveEndMonitor(threading.Thread):
 
                 @client.on(LiveEndEvent)
                 async def _on_end(event):
-                    log("تيك توك أعلن: البث انتهى رسمياً -> إغلاق يوتيوب فوراً.")
+                    log("تيك توك أعلن: البث انتهى رسمياً -> إغلاق بث انستجرام فوراً.")
                     self.owner.on_live_ended()
 
                 if await client.is_live():
@@ -190,7 +194,7 @@ class Restreamer:
         return None
 
     def run(self):
-        log(f"بدء النقل: CBR {VIDEO_BITRATE} | {FPS}fps | preset={X264_PRESET} | صوت {AUDIO_BITRATE}")
+        log(f"بدء النقل إلى Instagram: CBR {VIDEO_BITRATE} | {FPS}fps | preset={X264_PRESET} | صوت {AUDIO_BITRATE}")
         log(f"الحساب المستهدف: {TIKTOK_URL}")
         log(f"فحص الرابط كل {CHECK_INTERVAL:g} ثانية")
 
@@ -212,7 +216,7 @@ class Restreamer:
                 continue
             waiting_logged = False
 
-            log("تم التقاط رابط البث المباشر! تشغيل FFmpeg...")
+            log("تم التقاط رابط البث المباشر! تشغيل FFmpeg والنقل إلى انستجرام...")
             self.live_ended_event.clear()
             started = time.time()
 
