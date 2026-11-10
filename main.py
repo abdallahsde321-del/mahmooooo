@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """TikTok Live -> Instagram Restreamer (Stable / Light / High Quality).
 
-Re-encodes video to true CBR 5000k, keyframe every 2 seconds, 
-AAC 128k audio, and formatted for Instagram RTMP ingest.
+Re-encodes video to true CBR 4000k, keyframe every 2 seconds, 
+AAC 128k audio, and formatted (scaled & padded to 1080x1920) for Instagram RTMP ingest.
 """
 import asyncio
 import os
@@ -79,14 +79,17 @@ def build_ffmpeg_cmd(stream_url):
 
         "-i", stream_url,
 
-        # Streams: video + audio (audio optional)
+        # Streams: video + audio
         "-map", "0:v:0",
         "-map", "0:a:0?",
 
-        # Video: Encoding suitable for Instagram Live
+        # Scale & Pad to vertical 1080x1920 (Instagram standard)
+        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
+
+        # Video Encoding
         "-c:v", "libx264",
         "-preset", X264_PRESET,
-        "-profile:v", "baseline",                # Baseline/Main متوافق جداً مع RTMPS لانستجرام
+        "-profile:v", "baseline",
         "-pix_fmt", "yuv420p",
         "-b:v", VIDEO_BITRATE,
         "-minrate", VIDEO_BITRATE,
@@ -101,7 +104,7 @@ def build_ffmpeg_cmd(stream_url):
         "-keyint_min", str(GOP),
         "-sc_threshold", "0",
 
-        # Audio Format (Instagram requires AAC 44.1kHz)
+        # Audio
         "-c:a", "aac",
         "-b:a", AUDIO_BITRATE,
         "-ar", "44100",
