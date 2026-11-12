@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""TikTok Live -> Instagram Restreamer (Stable / Light / High Quality).
+"""TikTok Live -> Instagram & Facebook Restreamer (Stable / Single-Encode / High Quality).
 
-Re-encodes video to true CBR 4000k, keyframe every 2 seconds, 
-AAC 128k audio, and formatted (scaled & padded to 1080x1920) for Instagram RTMP ingest.
+Re-encodes video once to true CBR 4000k, keyframe every 2 seconds,
+AAC 128k audio, formatted (1080x1920) and pushed simultaneously to Instagram & Facebook via FFmpeg tee muxer.
 """
 import asyncio
 import os
@@ -36,20 +36,31 @@ def _env(name, default, cast=str):
         return default
 
 
-TIKTOK_URL = _env("TIKTOK_URL", "https://www.tiktok.com/@m.dawoud2/live")
+TIKTOK_URL = _env("TIKTOK_URL", "https://www.tiktok.com/@d.shakertawfiqalaroury/live")
 
 # رابط Instagram RTMP الخاص بك
-DEFAULT_IG_RTMP = "rtmps://edgetee-upload-hbe1-1.xx.fbcdn.net:443/rtmp/1771136117370887?s_bl=1&s_fbp=mrs2-1&s_igps=1&s_ow=10&s_prp=hbe1-1&s_ps=1&s_sw=0&s_tids=1&s_vt=ig&a=Ab4x6y9WOC56wMmLbjAux3NN"
+DEFAULT_IG_RTMP = (
+    "rtmps://edgetee-upload-hbe1-2.xx.fbcdn.net:443/rtmp/"
+    "2343049489658060?s_bl=1&s_fbp=mrs2-3&s_igps=1&s_ow=10&s_prp=hbe1-2&s_ps=1&s_sw=0&s_tids=1&s_vt=ig&a=Ab4Kb-cDxbiEWUd1PzUqGC-m"
+)
 INSTAGRAM_RTMP = _env("INSTAGRAM_RTMP", DEFAULT_IG_RTMP)
+
+# رابط ومفتاح Facebook Live RTMP الخاص بك
+DEFAULT_FB_SERVER = "rtmps://live-api-s.facebook.com:443/rtmp/"
+DEFAULT_FB_KEY = "FB-1441733074794590-0-Ab4vsuM-wRK5JNiofvTZ2kUW"
+FACEBOOK_RTMP = _env(
+    "FACEBOOK_RTMP",
+    f"{DEFAULT_FB_SERVER}{DEFAULT_FB_KEY}" if DEFAULT_FB_KEY else "",
+)
 
 _m = re.search(r"tiktok\.com/@([^/?#]+)", TIKTOK_URL)
 TIKTOK_USERNAME = _env("TIKTOK_USERNAME", _m.group(1) if _m else "")
 
-VIDEO_BITRATE = _env("VIDEO_BITRATE", "4000k")  # 4000k ممتازة ومستقرة مع سيرفرات انستجرام
+VIDEO_BITRATE = _env("VIDEO_BITRATE", "4000k")  # 4000k متوافق ومستقر مع إنستجرام وفيسبوك معاً
 AUDIO_BITRATE = _env("AUDIO_BITRATE", "128k")
 FPS = _env("FPS", 30, int)
 X264_PRESET = _env("X264_PRESET", "veryfast")
-GOP = FPS * 2                                   # Keyframe كل ثانيتين (مطلوبة من انستجرام)
+GOP = FPS * 2                                   # Keyframe كل ثانيتين (مطلوبة من المنصتين)
 
 CHECK_INTERVAL = _env("CHECK_INTERVAL", 1, float)
 LIVE_END_COOLDOWN = 15
@@ -62,7 +73,16 @@ def log(msg):
 
 
 def build_ffmpeg_cmd(stream_url):
-    return [
+    targets = []
+    if INSTAGRAM_RTMP:
+        targets.append(INSTAGRAM_RTMP)
+    if FACEBOOK_RTMP:
+        targets.append(FACEBOOK_RTMP)
+
+    if not targets:
+        raise ValueError("يجب تحديد رابط RTMP واحد على الأقل (إنستجرام أو فيسبوك).")
+
+    cmd = [
         "ffmpeg",
         "-hide_banner",
         "-nostdin",
@@ -83,7 +103,7 @@ def build_ffmpeg_cmd(stream_url):
         "-map", "0:v:0",
         "-map", "0:a:0?",
 
-        # Scale & Pad to vertical 1080x1920 (Instagram standard)
+        # Scale & Pad to vertical 1080x1920 (Instagram & Facebook vertical standard)
         "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
 
         # Video Encoding
@@ -112,10 +132,27 @@ def build_ffmpeg_cmd(stream_url):
         "-af", "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
 
         "-max_muxing_queue_size", "1024",
-        "-flvflags", "no_duration_filesize",
-        "-f", "flv",
-        INSTAGRAM_RTMP,
     ]
+
+    if len(targets) == 1:
+        cmd.extend([
+            "-flvflags", "no_duration_filesize",
+            "-f", "flv",
+            targets[0],
+        ])
+    else:
+        # إرسال نفس البث المشفر إلى المنصتين معاً بدون إعادة ترميز مزدوج
+        tee_outputs = "|".join(
+            f"[f=flv:flvflags=no_duration_filesize:onfail=ignore]{url}"
+            for url in targets
+        )
+        cmd.extend([
+            "-flags", "+global_header",
+            "-f", "tee",
+            tee_outputs,
+        ])
+
+    return cmd
 
 
 def make_session():
@@ -150,7 +187,7 @@ class LiveEndMonitor(threading.Thread):
 
                 @client.on(LiveEndEvent)
                 async def _on_end(event):
-                    log("تيك توك أعلن: البث انتهى رسمياً -> إغلاق بث انستجرام فوراً.")
+                    log("تيك توك أعلن: البث انتهى رسمياً -> إغلاق البث على المنصات فوراً.")
                     self.owner.on_live_ended()
 
                 if await client.is_live():
@@ -197,7 +234,13 @@ class Restreamer:
         return None
 
     def run(self):
-        log(f"بدء النقل إلى Instagram: CBR {VIDEO_BITRATE} | {FPS}fps | preset={X264_PRESET} | صوت {AUDIO_BITRATE}")
+        active_platforms = []
+        if INSTAGRAM_RTMP:
+            active_platforms.append("Instagram")
+        if FACEBOOK_RTMP:
+            active_platforms.append("Facebook")
+
+        log(f"بدء النقل إلى ({' + '.join(active_platforms)}): CBR {VIDEO_BITRATE} | {FPS}fps | preset={X264_PRESET} | صوت {AUDIO_BITRATE}")
         log(f"الحساب المستهدف: {TIKTOK_URL}")
         log(f"فحص الرابط كل {CHECK_INTERVAL:g} ثانية")
 
@@ -219,7 +262,7 @@ class Restreamer:
                 continue
             waiting_logged = False
 
-            log("تم التقاط رابط البث المباشر! تشغيل FFmpeg والنقل إلى انستجرام...")
+            log(f"تم التقاط رابط البث المباشر! تشغيل FFmpeg والنقل إلى ({' + '.join(active_platforms)})...")
             self.live_ended_event.clear()
             started = time.time()
 
