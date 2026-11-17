@@ -62,7 +62,7 @@ FACEBOOK_RTMP = env_value(
 # حط مفتاح بث إنستجرام بعد /rtmp/ هنا
 INSTAGRAM_RTMP = env_value(
     "INSTAGRAM_RTMP",
-    "rtmps://edgetee-upload-hbe1-2.xx.fbcdn.net:443/rtmp/",
+    "rtmps://edgetee-upload-hbe1-2.xx.fbcdn.net:443/rtmp/2343049489658060?s_bl=1&s_fbp=mrs2-2&s_igps=1&s_ow=10&s_prp=hbe1-1&s_ps=1&s_sw=0&s_tids=1&s_vt=ig&a=Ab71eYe_oChn0-eqliu4MQCk",
 ).strip()
 
 _match = re.search(r"tiktok\.com/@([^/?#]+)", TIKTOK_URL)
