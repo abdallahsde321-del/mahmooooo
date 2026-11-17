@@ -1,11 +1,12 @@
 name: Run Restreamer
 
 on:
-  workflow_dispatch: # يتيح لك تشغيل البث يدوياً بضغطة زر
+  workflow_dispatch: # تشغيل البث يدوياً بضغطة زر
 
 jobs:
   restream:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Code
@@ -14,12 +15,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg and mbuffer
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg mbuffer
 
       - name: Install Dependencies
         run: |
