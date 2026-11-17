@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """TikTok LIVE -> Facebook & Instagram RTMPS restreamer.
 
-Selected source quality: h264_hd (verified in Streamlink output).
-Video is copied without re-encoding; audio is encoded to AAC; an optional FLV
-filler stage paces output and pads H.264 video tags; FFmpeg tee muxer pushes
-to Facebook and Instagram simultaneously.
+Selects H.264 HD stream ('h264_hd' or 'hd' depending on CDN manifest) and avoids
+HEVC. Video is copied without re-encoding; audio is encoded to AAC; an optional
+FLV filler stage paces output; FFmpeg tee muxer pushes to Facebook and Instagram
+simultaneously.
 """
 
 from __future__ import annotations
@@ -59,10 +59,10 @@ FACEBOOK_RTMP = env_value(
     "rtmps://live-api-s.facebook.com:443/rtmp/FB-122145065265180204-0-Ab6FqbEw50G14AO3ATPTeo9h",
 ).strip()
 
-# الزق مفتاح بث إنستجرام بعد /rtmp/ مباشرة
+# حط مفتاح بث إنستجرام بعد /rtmp/ هنا
 INSTAGRAM_RTMP = env_value(
     "INSTAGRAM_RTMP",
-    "rtmps://edgetee-upload-hbe1-2.xx.fbcdn.net:443/rtmp/2343049489658060?s_bl=1&s_fbp=mrs2-2&s_igps=1&s_ow=10&s_prp=hbe1-1&s_ps=1&s_sw=0&s_tids=1&s_vt=ig&a=Ab71eYe_oChn0-eqliu4MQCk",
+    "rtmps://edgetee-upload-hbe1-2.xx.fbcdn.net:443/rtmp/",
 ).strip()
 
 _match = re.search(r"tiktok\.com/@([^/?#]+)", TIKTOK_URL)
@@ -71,7 +71,7 @@ TIKTOK_USERNAME = env_value(
     _match.group(1) if _match else "",
 )
 
-QUALITY = "h264_hd"
+PREFERRED_QUALITIES = ("h264_hd", "hd", "h264_sd", "sd")
 
 COPY_VIDEO = env_value("COPY_VIDEO", 1, int)  # 1 = copy; 0 = H.264 re-encode
 FILLER_KBPS = env_value("FILLER_KBPS", 3850, int)  # 0 disables filler stage
@@ -140,6 +140,27 @@ def get_active_targets() -> List[tuple[str, str]]:
     ):
         targets.append(("Instagram", INSTAGRAM_RTMP))
     return targets
+
+
+def select_stream_quality(streams) -> Optional[str]:
+    """Pick an H.264 video stream and never select HEVC/H.265 variants."""
+    if not streams:
+        return None
+
+    for candidate in PREFERRED_QUALITIES:
+        if candidate in streams:
+            return candidate
+
+    for name in sorted(streams.keys()):
+        if name.startswith("h264_") and not name.endswith("_ao"):
+            return name
+
+    # Only fall back to 'best' if no H.265 variants exist in the manifest.
+    has_hevc = any("h265" in k or "hevc" in k for k in streams.keys())
+    if not has_hevc and "best" in streams:
+        return "best"
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +415,7 @@ def build_rtmp_output_args(targets: List[tuple[str, str]]) -> List[str]:
     return ["-f", "tee", tee_slaves]
 
 
-def build_pipeline(use_slate: bool = False) -> str:
+def build_pipeline(quality: str, use_slate: bool = False) -> str:
     targets = get_active_targets()
     if not targets:
         raise RuntimeError("No active RTMPS targets configured.")
@@ -445,7 +466,7 @@ def build_pipeline(use_slate: bool = False) -> str:
         "--retry-streams", "2",
         "--retry-max", "5",
         TIKTOK_URL,
-        QUALITY,
+        quality,
     ]
     buffer_command = [
         "mbuffer", "-q", "-m", f"{BUF_MB}M", "-P", str(PREFILL_PCT),
@@ -591,6 +612,7 @@ class Restreamer:
         self.session = make_session()
         self.session_created_at = time.monotonic()
         self.proc: Optional[subprocess.Popen] = None
+        self.selected_quality: str = "h264_hd"
         self.last_live_end: Optional[float] = None
         self.last_memory_check = 0.0
         self.last_memory_cleanup = 0.0
@@ -697,16 +719,18 @@ class Restreamer:
                 self.last_wait_log = time.time()
             return False
 
-        if QUALITY not in streams:
+        chosen = select_stream_quality(streams)
+        if not chosen:
             if self.last_wait_log == 0 or time.time() - self.last_wait_log >= 60:
                 available = ", ".join(sorted(streams.keys()))
                 log(
-                    f"TikTok is live, but required quality {QUALITY!r} is unavailable. "
+                    "TikTok is live, but no compatible H.264 video stream is available. "
                     f"Available streams: {available}"
                 )
                 self.last_wait_log = time.time()
             return False
 
+        self.selected_quality = chosen
         self.last_wait_log = 0.0
         return True
 
@@ -729,7 +753,7 @@ class Restreamer:
         )
         log(
             f"Starting relay -> [{target_names}] | {mode} | audio AAC {AUDIO_BITRATE} | "
-            f"quality {QUALITY} | Python RSS limit {RSS_LIMIT_MB} MiB"
+            f"auto H.264 quality | Python RSS limit {RSS_LIMIT_MB} MiB"
         )
         log(f"TikTok source: {TIKTOK_URL}")
 
@@ -762,21 +786,24 @@ class Restreamer:
                 if slate_thread is not None and slate_thread.is_alive():
                     log("Waiting for the optional slate file to finish building...")
                     slate_thread.join(timeout=90)
-                log(f"TikTok LIVE detected; starting [{target_names}] with slate.")
+                log(f"TikTok LIVE detected (quality={self.selected_quality}); starting [{target_names}] with slate.")
             elif offline_for is not None and offline_for < SLATE_MIN_OFFLINE:
                 log(
-                    f"TikTok LIVE returned after {int(offline_for)}s; "
+                    f"TikTok LIVE returned after {int(offline_for)}s (quality={self.selected_quality}); "
                     "starting without a slate."
                 )
             else:
-                log(f"TikTok LIVE detected; starting Streamlink -> mbuffer -> FFmpeg -> [{target_names}].")
+                log(
+                    f"TikTok LIVE detected (quality={self.selected_quality}); "
+                    f"starting Streamlink -> mbuffer -> FFmpeg -> [{target_names}]."
+                )
 
             self.live_ended_event.clear()
             started_at = time.time()
 
             try:
                 self.proc = subprocess.Popen(
-                    build_pipeline(use_slate),
+                    build_pipeline(self.selected_quality, use_slate),
                     shell=True,
                     executable="/bin/bash",
                     preexec_fn=os.setsid,
